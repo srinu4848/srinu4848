@@ -1,0 +1,243 @@
+var urlopen = require('urlopen');
+var fs = require('fs');
+var hm = require('header-metadata');
+var sm = require('service-metadata')
+var logger = console.options({
+	'category': 'all'
+});
+
+var ctx = session.name("rreq") || session.createContext("rreq");
+session.INPUT.readAsJSON(function(readAsJSONError, incomingdata) {
+
+	if (readAsJSONError) {
+		logger.error("Error in reading Incoming Data" + JSON.stringify(error));
+		session.reject(readAsJSONError);
+	} else {
+
+		var OMSUrl = session.parameters.OMSUrl;
+
+		if ((OMSUrl == undefined) || (OMSUrl == ' ') || (OMSUrl == null)) {
+			logger.error("Error in connection with OMSUrl" + JSON.stringify(error));
+			session.reject("Error in connection with OMSUrl" + JSON.stringify(error));
+		} else {
+
+			ctx.setVariable("incomin", incomingdata)
+
+
+			//Start of Lookups
+
+			//Start of Payload Post
+			var Client = incomingdata.CallBackData.Client;
+			var ServiceName = incomingdata.CallBackData.ServiceName;
+			var ExternalRefID = incomingdata.CallBackData.ExternalRefID;
+
+			var engineerType = incomingdata.CrewRequest.CrewType;
+			var taskType = incomingdata.CrewRequest.WorkType;
+
+
+			var lookupForCrewtype = {
+				"lookupReq": {
+					"type": [
+						{
+							"name": "crewTypes",
+							"label": engineerType
+
+						},
+						{
+							"name": "workTypes",
+							"label": taskType
+
+						}
+
+					]
+				}
+			};
+
+			var url = session.parameters.lookupUrl;
+			var LookupServiceResponse = {
+
+				target: url,
+				method: 'POST',
+				contentType: 'application/json',
+				data: lookupForCrewtype
+
+			};
+			urlopen.open(LookupServiceResponse, function(error, response) {
+				if (error) {
+					logger.error("urlopen connect error from CrewType LookupServiceResponse" + JSON.stringify(error));
+					session.reject("urlopen connect error from CrewType LookupServiceResponse" + JSON.stringify(error));
+				} else {
+					var responseStatusCode = response.statusCode;
+					if (responseStatusCode == 200) {
+						response.readAsJSON(function(error, responseData) {
+							if (error) {
+								logger.error("rreq_002:Failure in reading the message for Crewtype LookupServiceResponse " + JSON.stringify(error));
+								session.reject("Failure in reading the message for Crewtype LookupServiceResponse " + JSON.stringify(error));
+							} else {
+								hm.response.statusCode = responseStatusCode;
+								logger.debug("Response received from the LookupServiceResponse " + responseData);
+								ctx.setVariable("res", responseData);
+
+								if ((responseData.lookupRep.type[0].result == 1) || (responseData.lookupRep.type[1].result == 1)) {
+									logger.error("Invalid Lookup Request :" + JSON.stringify(responseData))
+									session.reject("Invalid Lookup Request :" + JSON.stringify(responseData))
+								} else {
+
+
+									var status = responseData.lookupRep.type[0].status;
+									var internalId = responseData.lookupRep.type[1].id;
+
+									ctx.setVariable("status", status);
+									ctx.setVariable("internalId", internalId);
+
+									var JobIDGUID = incomingdata.CrewRequest.JobIDGUID;
+
+									var Longitude = incomingdata.CrewRequest.Longitude;
+									var Latitude = incomingdata.CrewRequest.Latitude;
+
+									//	var status = ctx.getVariable("status");
+									//	var internalId = ctx.getVariable("internalId");
+
+									var OMSpayload = {
+										"workTypeID": internalId,
+										"status": -1,
+										"requestedCrewType": status,
+
+
+										"location": {
+											"coordinates": [
+												Longitude,
+												Latitude
+											],
+											"type": "Point"
+										}
+									};
+
+									var Token = session.parameters.OMSToken;
+									var PayloadUrl = OMSUrl + '/api/v1/ServiceType/Electric/CrewAssignment?jobIDs=' + JobIDGUID;
+									var CrewAssignment = {
+
+										target: PayloadUrl,
+										sslClientProfile: 'omsapi_client_profile',
+										method: 'POST',
+										contentType: 'application/json',
+										data: OMSpayload,
+										headers: {
+											'osiApiToken': Token
+										}
+									};
+
+									// Start of Url Open for calling OMSUrl
+
+									urlopen.open(CrewAssignment, function(error, response) {
+
+										if (error) {
+											logger.error("rreq_003:urlopen connect error with OMS" + JSON.stringify(error));
+											ctx.setVariable("retry", 'yes');
+											var ErrorTxt = " urlopen connect error with POST call for OMS api" + JSON.stringify(error);
+											ctx.setVariable("ErrorTxt", ErrorTxt);
+											//session.reject("urlopen connect error with OMS" + JSON.stringify(error));
+										} else {
+
+											var responseStatusCode = response.statusCode;
+											if (responseStatusCode == 200) {
+												response.readAsJSON(function(error, responseData) {
+													if (error) {
+														logger.error("Failure in getting the response from CrewAssignment" + JSON.stringify(error));
+														session.reject("Failure in getting the response from CrewAssignment" + JSON.stringify(error));
+
+													} else {
+
+														hm.response.statusCode = '200 OK';
+														logger.debug("Response received from CrewAssignment :" + JSON.stringify(responseData));
+													}
+												});
+											}
+											else if (responseStatusCode == 400) {
+												response.readAsBuffer(function(error, responseData) {
+
+													if (error) {
+														logger.error("Failure in reading the response data from CrewAssignment" + JSON.stringify(error));
+														session.reject("Failure in reading the response data from CrewAssignment");
+													} else {
+														hm.current.statusCode = responseStatusCode;
+														//logger.error("Error returned from CrewAssignment " + ": with statusCode " + responseStatusCode + " " + responseData);
+														var res = responseData.toString();
+														var QueueMessage = {
+															"CallBackData": {
+																"Client": Client,
+																"ServiceName": incomingdata.CallBackData.ServiceName,
+																"ExternalRefID": ExternalRefID
+															},
+															"ErrorMessage": 
+res
+														}
+													};
+													var targetQueue = session.parameters.Queue;
+													var options = {
+														target: targetQueue,
+														data: QueueMessage
+													};
+													urlopen.open(options, function(error, response) {
+														var hm = require('header-metadata');
+														if (error) {
+															logger.error(' Mqurlopen.open error');
+															session.reject('** Mqurlopen.open error');
+															hm.response.statusCode = 500;
+														} else {
+															var mqrc = response.statusCode;
+															if (mqrc == 0) {
+																response.readAsBuffer(function(readError, responseData) {
+																	if (readError) {
+																		hm.response.statusCode = 500
+																	} else {
+																		console.log("MQResponseData " + responseData);
+																	}
+																});
+															} else {
+																logger.error(' ** Mqurlopen.open error [MQRC=' + mqrc + ']');
+																session.reject('** Mqurlopen.open error [MQRC=' + mqrc + ']');
+																hm.response.statusCode = 500
+															}
+														}
+													})
+													session.reject("Bad Request Error from CrewAssignment:" + JSON.stringify(error));
+
+												});
+											}
+											else {
+
+												response.readAsBuffer(function(error, responseData) {
+
+													if (error) {
+														logger.error("Failure in reading the response data from CrewAssignment" + JSON.stringify(error));
+														session.reject("Failure in reading the response data from CrewAssignment");
+													} else {
+														hm.current.statusCode = responseStatusCode;
+														logger.error("rreq_004:Error returned from CrewAssignment " + ": with statusCode " + responseStatusCode + " " + responseData);
+														ctx.setVariable("retry", 'yes');
+														var ErrorTxt = " urlopen connect error with POST call for OMS api" + JSON.stringify(error);
+														ctx.setVariable("ErrorTxt", ErrorTxt);
+														//session.reject("Error returned from CrewAssignment " + ": with statusCode " + responseStatusCode + " " + responseData);
+
+													}
+												});
+											}
+										}
+									});
+								}
+							}
+						});
+						
+					} else {
+						logger.error("Error received in reading response data " + responseStatusCode);
+						session.reject("Error received in reading response data " + responseStatusCode);
+					}
+				}
+			});
+
+		}
+
+	}
+
+});
